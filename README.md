@@ -38,6 +38,17 @@ npm run api      # terminal 1: Python server on :8000
 npm start        # terminal 2: http://localhost:4200, with /api proxied to :8000
 ```
 
+## Deploy to Render
+
+Use a **Web Service**, not a Static Site. A Static Site can't run the Python server.
+
+- **Easiest:** in Render, choose **New → Blueprint** and pick this repo. [render.yaml](render.yaml) fills in all the settings.
+- **Manual:** choose **New → Web Service**, then:
+  - Runtime: **Python 3**
+  - Build command: `npm ci && npx ng build && pip install -r requirements.txt`
+  - Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+  - Health check path: `/api/health`
+
 ## API
 
 | Method | Path | Body / result |

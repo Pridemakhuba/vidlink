@@ -47,6 +47,11 @@ app.add_middleware(
 )
 
 
+@app.get("/api/health")
+def health():
+    return {"ok": True}
+
+
 # ---------- helpers ----------
 
 def detect_platform(url: str) -> str:
