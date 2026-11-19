@@ -14,6 +14,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections import defaultdict, deque
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urljoin, urlparse
@@ -40,7 +41,14 @@ def _env_int(name: str, default: int) -> int:
 # ---------- configuration (override with environment variables) ----------
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
-COOKIES_FILE = os.environ.get("COOKIES_FILE")  # optional, helps with IG/FB/YT login walls
+# Optional Netscape cookies.txt. On Render, add it as a Secret File and set
+# COOKIES_FILE=/etc/secrets/cookies.txt. Helps with YouTube "not a bot" checks
+# and Instagram/Facebook login walls.
+COOKIES_FILE = os.environ.get("COOKIES_FILE")
+# Optional proxy, e.g. http://user:pass@host:port or socks5://host:port.
+# Cloud servers are often blocked by YouTube; a residential proxy fixes that.
+PROXY_URL = os.environ.get("PROXY_URL")
+PROXY_PLATFORMS = {p.strip() for p in os.environ.get("PROXY_PLATFORMS", "youtube").split(",") if p.strip()}
 ALLOWED_HOSTS = [h.strip() for h in os.environ.get("ALLOWED_HOSTS", "").split(",") if h.strip()]
 # Behind Render / a reverse proxy, the real client IP is in X-Forwarded-For.
 TRUST_PROXY = os.environ.get("TRUST_PROXY", "1" if os.environ.get("RENDER") else "0") == "1"
@@ -249,6 +257,41 @@ def resolve_short_link(url: str) -> str:
     raise HTTPException(400, "This link type isn't supported. Open the video and copy its full link.")
 
 
+_cookies_master: str | None = None
+if COOKIES_FILE:
+    if Path(COOKIES_FILE).is_file():
+        # Secret files are read-only and yt-dlp writes cookies back, so work on a copy.
+        _cookies_master = str(Path(tempfile.gettempdir()) / "allvidlink-cookies.txt")
+        shutil.copyfile(COOKIES_FILE, _cookies_master)
+        log.info("cookies loaded")
+    else:
+        log.warning("COOKIES_FILE is set but the file was not found")
+
+
+@contextmanager
+def ydl_session(platform: str, extra: dict | None = None):
+    """A YoutubeDL instance with our safe defaults. Each session gets its own
+    copy of the cookies so parallel downloads never corrupt the file."""
+    opts = base_opts() | (extra or {})
+    cookie_copy = None
+    if _cookies_master:
+        fd, cookie_copy = tempfile.mkstemp(prefix="avl-ck-", suffix=".txt")
+        os.close(fd)
+        shutil.copyfile(_cookies_master, cookie_copy)
+        opts["cookiefile"] = cookie_copy
+    if PROXY_URL and platform in PROXY_PLATFORMS:
+        opts["proxy"] = PROXY_URL
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            yield ydl
+    finally:
+        if cookie_copy:
+            try:
+                os.remove(cookie_copy)
+            except OSError:
+                pass
+
+
 def base_opts() -> dict:
     opts = {
         "quiet": True,
@@ -263,18 +306,45 @@ def base_opts() -> dict:
         "socket_timeout": 20,
         "retries": 3,
     }
-    if COOKIES_FILE:
-        opts["cookiefile"] = COOKIES_FILE
     return opts
 
 
-def clean_error(e: Exception) -> str:
-    msg = ANSI.sub("", str(e)).replace("ERROR: ", "").strip()
-    msg = re.sub(r"^\[[^\]]+\]\s*[^:]*:\s*", "", msg)  # drop "[youtube] abc123: " prefix
-    msg = re.sub(r"[A-Za-z]:\\[^\s]+|/(?:tmp|opt|home|var)/[^\s]+", "", msg)  # never leak paths
-    if not msg:
-        return "This video couldn't be processed."
-    return msg[:300]
+PLATFORM_NAMES = {"youtube": "YouTube", "facebook": "Facebook", "instagram": "Instagram", "tiktok": "TikTok"}
+
+# (pattern in yt-dlp's error, message shown to the user). First match wins.
+ERROR_MAP: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"requested format is not available|no formats", re.I),
+     "That quality isn't available for this video. Try Best quality."),
+    (re.compile(r"too large|max.?filesize|larger than", re.I),
+     "This file is too large to download."),
+    (re.compile(r"too long|live stream|is live|premiere", re.I),
+     "This video is too long or is a live stream."),
+    (re.compile(r"unsupported url|no suitable extractor", re.I),
+     "This link type isn't supported. Open the video and copy its full link."),
+    (re.compile(r"confirm your age|age[- ]restricted|inappropriate for some users", re.I),
+     "Age-restricted videos can't be downloaded."),
+    (re.compile(r"not a bot|player response|http error 429|too many requests|rate.?limit|po token", re.I),
+     "{p} is temporarily blocking requests from our server. Please try again later."),
+    (re.compile(r"private|login required|log in|sign in|cookies|requires authentication|"
+                r"only available to|members only|join this channel", re.I),
+     "This video is private or needs a login, so it can't be downloaded."),
+    (re.compile(r"video unavailable|not available|removed|deleted|does not exist|"
+                r"no video|404|content isn.t available|geo|country", re.I),
+     "This video is unavailable. It may have been removed or blocked in our region."),
+    (re.compile(r"timed out|timeout|connection|network|unreachable|ssl", re.I),
+     "Couldn't reach {p}. Please try again."),
+]
+
+
+def friendly_error(e: Exception, platform: str) -> str:
+    """Turn a yt-dlp error into a short, safe message. The raw error is only logged."""
+    raw = ANSI.sub("", str(e))
+    log.warning("yt-dlp error (%s): %s", platform, raw[:500])
+    name = PLATFORM_NAMES.get(platform, "The platform")
+    for pattern, message in ERROR_MAP:
+        if pattern.search(raw):
+            return message.format(p=name)
+    return "This video couldn't be processed. Please check the link and try again."
 
 
 def check_limits(info: dict):
@@ -297,10 +367,10 @@ def get_info(req: InfoRequest, request: Request):
     url, platform = validate_url(req.url)
     url = resolve_short_link(url)
     try:
-        with yt_dlp.YoutubeDL(base_opts()) as ydl:
+        with ydl_session(platform) as ydl:
             info = ydl.extract_info(url, download=False)
     except yt_dlp.utils.DownloadError as e:
-        raise HTTPException(422, clean_error(e))
+        raise HTTPException(422, friendly_error(e, platform))
     except Exception:
         log.exception("info failed for %s", url)
         raise HTTPException(422, "This video couldn't be processed.")
@@ -351,7 +421,7 @@ def _update(job_id: str, **fields):
             jobs[job_id].update(fields)
 
 
-def _run_job(job_id: str, req: JobRequest, url: str, workdir: Path):
+def _run_job(job_id: str, req: JobRequest, url: str, platform: str, workdir: Path):
     def progress_hook(d):
         if d["status"] == "downloading":
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
@@ -374,7 +444,7 @@ def _run_job(job_id: str, req: JobRequest, url: str, workdir: Path):
         if d["status"] == "started":
             _update(job_id, status="processing", progress=None)
 
-    opts = base_opts() | {
+    opts = {
         "outtmpl": str(workdir / "%(title).80B.%(ext)s"),
         "progress_hooks": [progress_hook],
         "postprocessor_hooks": [pp_hook],
@@ -395,16 +465,16 @@ def _run_job(job_id: str, req: JobRequest, url: str, workdir: Path):
         opts["merge_output_format"] = "mp4"
 
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with ydl_session(platform, opts) as ydl:
             ydl.download([url])
         files = [p for p in workdir.iterdir() if p.is_file() and not p.name.endswith((".part", ".ytdl"))]
         if not files:
-            raise yt_dlp.utils.DownloadError("This video is too long, too large or is a live stream.")
+            raise yt_dlp.utils.DownloadError("This video is too long or is a live stream.")
         out = max(files, key=lambda p: p.stat().st_size)
         _update(job_id, status="done", progress=100, filename=out.name, path=str(out),
                 size=out.stat().st_size)
     except yt_dlp.utils.DownloadError as e:
-        _update(job_id, status="error", error=clean_error(e))
+        _update(job_id, status="error", error=friendly_error(e, platform))
     except Exception:
         log.exception("job %s failed", job_id)
         _update(job_id, status="error", error="This video couldn't be processed.")
@@ -421,7 +491,7 @@ def _run_job(job_id: str, req: JobRequest, url: str, workdir: Path):
 @app.post("/api/jobs")
 def create_job(req: JobRequest, request: Request):
     ip = rate_limit(request, "jobs", RATE_JOBS)
-    url, _ = validate_url(req.url)
+    url, platform = validate_url(req.url)
     url = resolve_short_link(url)
 
     with jobs_lock:
@@ -437,7 +507,7 @@ def create_job(req: JobRequest, request: Request):
             "id": job_id, "status": "queued", "progress": 0, "part": 0, "kind": req.kind,
             "created": time.time(), "workdir": str(workdir), "ip": ip, "active": True,
         }
-    threading.Thread(target=_run_job, args=(job_id, req, url, workdir), daemon=True).start()
+    threading.Thread(target=_run_job, args=(job_id, req, url, platform, workdir), daemon=True).start()
     return {"id": job_id}
 
 

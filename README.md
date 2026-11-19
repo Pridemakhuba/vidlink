@@ -78,8 +78,23 @@ To change a limit, set one of these environment variables (in Render: **Environm
 
 Finished files are stored in your system temp folder (`%TEMP%\allvidlink`). They are deleted after 30 minutes.
 
+## YouTube on Render ("not a bot" blocks)
+
+YouTube blocks most cloud servers, including Render's. Visitors then see "YouTube is temporarily blocking requests from our server". Facebook, Instagram and TikTok usually keep working. There are two fixes, and you can use both.
+
+**1. Cookies (free, try this first)**
+1. In a private browser window, sign in to YouTube with a **separate Google account**, not your personal one. YouTube can restrict accounts used this way.
+2. Use a browser extension such as "Get cookies.txt LOCALLY" to export the `youtube.com` cookies to `cookies.txt`, then close the private window without signing out.
+3. In Render, go to the service, then **Environment → Secret Files**. Add a file named `cookies.txt` with that content.
+4. Add the environment variable `COOKIES_FILE` = `/etc/secrets/cookies.txt`, then redeploy.
+
+The cookies expire after a while. When the blocks come back, repeat these steps.
+
+**2. Residential proxy (paid, most reliable)**
+Set `PROXY_URL` (for example `http://user:pass@host:port`). By default it's used only for YouTube. To use it for other platforms too, set `PROXY_PLATFORMS`, for example `youtube,instagram`.
+
 ## Notes
 
-- **Instagram/Facebook login walls:** some posts need a logged-in session. Export your browser cookies to a Netscape `cookies.txt` file and set `COOKIES_FILE=C:\path\cookies.txt` before you start the server.
+- **Instagram/Facebook login walls:** the same `COOKIES_FILE` setting works for them. Export cookies for those sites into the same file.
 - **Sites change often.** When a platform stops working, update yt-dlp: `.venv\Scripts\python -m pip install -U yt-dlp`.
 - Only download content you own or have permission to use.
