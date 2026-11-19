@@ -4,16 +4,14 @@ import { FormsModule } from '@angular/forms';
 import { Subscription, switchMap, takeWhile, timer } from 'rxjs';
 import { COMPANY, POLICIES, PolicyId } from './legal';
 
-const CONSENT_KEY = 'avl-cookie-consent';
-
 type Platform = 'youtube' | 'facebook' | 'instagram' | 'tiktok';
 
 interface VideoInfo {
   platform: Platform;
   title: string;
-  uploader?: string;
-  thumbnail?: string;
-  duration?: number;
+  uploader?: string | null;
+  thumbnail?: string | null;
+  duration?: number | null;
   heights: number[];
   webpage_url: string;
 }
@@ -24,21 +22,21 @@ interface Job {
   progress: number | null;
   part: number;
   kind: 'video' | 'audio';
-  speed?: number;
-  eta?: number;
-  downloaded?: number;
-  total?: number;
-  filename?: string;
-  size?: number;
-  error?: string;
+  speed?: number | null;
+  eta?: number | null;
+  filename?: string | null;
+  size?: number | null;
+  error?: string | null;
 }
 
 const API = '/api';
+const CONSENT_KEY = 'avl-cookie-consent';
+const MAX_URL = 2048;
 
 const PLATFORM_PATTERNS: [Platform, RegExp][] = [
-  ['youtube', /(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)$/i],
-  ['facebook', /(^|\.)(facebook\.com|fb\.watch|fb\.com)$/i],
-  ['instagram', /(^|\.)(instagram\.com|instagr\.am)$/i],
+  ['youtube', /(^|\.)(youtube\.com|youtu\.be)$/i],
+  ['facebook', /(^|\.)(facebook\.com|fb\.watch)$/i],
+  ['instagram', /(^|\.)instagram\.com$/i],
   ['tiktok', /(^|\.)tiktok\.com$/i],
 ];
 
@@ -46,170 +44,142 @@ const PLATFORM_PATTERNS: [Platform, RegExp][] = [
   selector: 'app-root',
   imports: [FormsModule],
   template: `
-    <main class="shell">
-      <header class="brand">
-        <div class="logo" aria-hidden="true">
-          <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
-        </div>
-        <h1>AllvidLink</h1>
-        <p class="tagline">Paste a link. Get the video or audio. That's it.</p>
-        <ul class="platforms">
-          @for (p of platforms; track p.id) {
-            <li [class.active]="detected() === p.id" [attr.data-p]="p.id">{{ p.label }}</li>
-          }
-        </ul>
-      </header>
+    <header class="topbar">
+      <div class="container topbar-inner">
+        <a class="brand" href="/" aria-label="AllvidLink home">
+          <span class="mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg></span>
+          AllvidLink
+        </a>
+      </div>
+    </header>
 
-      <form class="search" (ngSubmit)="fetchInfo()">
+    <main class="container main">
+      <section class="hero">
+        <h1>Download video or audio</h1>
+        <p class="lead">Paste a YouTube, Facebook, Instagram or TikTok link.</p>
+      </section>
+
+      <form class="search" (ngSubmit)="fetchInfo()" novalidate>
         <input
           type="url"
           name="url"
+          inputmode="url"
+          [maxlength]="maxUrl"
           [ngModel]="url()"
           (ngModelChange)="url.set($event)"
-          placeholder="https://www.youtube.com/watch?v=…"
+          placeholder="https://"
           autocomplete="off"
           spellcheck="false"
-          aria-label="Video URL"
+          aria-label="Video link"
         />
         @if (url()) {
-          <button type="button" class="ghost" (click)="reset()" aria-label="Clear">✕</button>
+          <button type="button" class="icon-btn" (click)="reset()" aria-label="Clear">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
         } @else {
-          <button type="button" class="ghost" (click)="paste()">Paste</button>
+          <button type="button" class="text-btn" (click)="paste()">Paste</button>
         }
-        <button type="submit" class="primary" [disabled]="!url() || loadingInfo()">
-          @if (loadingInfo()) { <span class="spinner"></span> } @else { Convert }
+        <button type="submit" class="btn" [disabled]="!url() || loadingInfo()">
+          @if (loadingInfo()) { <span class="spinner" aria-hidden="true"></span> } Continue
         </button>
       </form>
 
       @if (error()) {
-        <div class="alert" role="alert">{{ error() }}</div>
+        <p class="alert" role="alert">{{ error() }}</p>
       }
 
       @if (info(); as v) {
-        <section class="card">
+        <section class="result" aria-live="polite">
           <div class="thumb">
             @if (v.thumbnail) {
-              <img [src]="v.thumbnail" alt="" referrerpolicy="no-referrer" />
+              <img [src]="v.thumbnail" alt="" referrerpolicy="no-referrer" loading="lazy" />
             }
             @if (v.duration) {
               <span class="duration">{{ formatDuration(v.duration) }}</span>
             }
-            <span class="badge" [attr.data-p]="v.platform">{{ v.platform }}</span>
           </div>
 
           <div class="details">
-            <h2 [title]="v.title">{{ v.title }}</h2>
-            @if (v.uploader) { <p class="muted">{{ v.uploader }}</p> }
-
-            <div class="tabs" role="tablist">
-              <button type="button" role="tab" [class.on]="kind() === 'video'"
-                      (click)="kind.set('video')" [disabled]="busy()">🎬 Video (MP4)</button>
-              <button type="button" role="tab" [class.on]="kind() === 'audio'"
-                      (click)="kind.set('audio')" [disabled]="busy()">🎵 Audio</button>
+            <div>
+              <h2 [title]="v.title">{{ v.title }}</h2>
+              @if (v.uploader) { <p class="meta">{{ v.uploader }}</p> }
             </div>
 
-            <div class="options">
-              @if (kind() === 'video') {
-                <label>
-                  Quality
-                  <select [ngModel]="quality()" (ngModelChange)="quality.set($event)" [disabled]="busy()">
-                    <option [ngValue]="null">Best available</option>
-                    @for (h of qualityOptions(); track h) {
-                      <option [ngValue]="h">{{ h }}p</option>
-                    }
-                  </select>
-                </label>
-              } @else {
-                <label>
-                  Format
-                  <select [ngModel]="audioFormat()" (ngModelChange)="audioFormat.set($event)" [disabled]="busy()">
-                    <option value="mp3">MP3 · 192 kbps</option>
-                    <option value="m4a">M4A · AAC</option>
-                  </select>
-                </label>
-              }
+            <div class="segmented" role="radiogroup" aria-label="Format">
+              <button type="button" role="radio" [attr.aria-checked]="kind() === 'video'"
+                      [class.on]="kind() === 'video'" (click)="kind.set('video')" [disabled]="busy()">Video</button>
+              <button type="button" role="radio" [attr.aria-checked]="kind() === 'audio'"
+                      [class.on]="kind() === 'audio'" (click)="kind.set('audio')" [disabled]="busy()">Audio</button>
+            </div>
 
-              <button type="button" class="primary wide" (click)="startDownload()" [disabled]="busy()">
-                @if (busy()) { <span class="spinner"></span> Working… } @else { ⬇ Download }
+            <div class="actions">
+              @if (kind() === 'video') {
+                <select aria-label="Quality" [ngModel]="quality()" (ngModelChange)="quality.set($event)" [disabled]="busy()">
+                  <option [ngValue]="null">Best quality</option>
+                  @for (h of qualityOptions(); track h) {
+                    <option [ngValue]="h">{{ h }}p</option>
+                  }
+                </select>
+              } @else {
+                <select aria-label="Audio format" [ngModel]="audioFormat()" (ngModelChange)="audioFormat.set($event)" [disabled]="busy()">
+                  <option value="mp3">MP3</option>
+                  <option value="m4a">M4A</option>
+                </select>
+              }
+              <button type="button" class="btn grow" (click)="startDownload()" [disabled]="busy()">
+                @if (busy()) { <span class="spinner" aria-hidden="true"></span> Preparing } @else { Download }
               </button>
             </div>
 
             @if (job(); as j) {
               <div class="progress-wrap">
                 <div class="progress" [class.indeterminate]="j.progress == null || j.status !== 'downloading'"
-                     [class.done]="j.status === 'done'" [class.failed]="j.status === 'error'">
+                     [class.done]="j.status === 'done'" [class.failed]="j.status === 'error'"
+                     role="progressbar" aria-label="Download progress"
+                     [attr.aria-valuenow]="j.status === 'downloading' ? j.progress : null">
                   <div class="bar" [style.width.%]="j.status === 'done' ? 100 : (j.progress ?? 0)"></div>
                 </div>
-                <p class="status">{{ statusText() }}</p>
-                @if (j.status === 'done') {
-                  <a class="save" [href]="fileUrl(j.id)" download>💾 Save {{ j.filename }}</a>
-                }
+                <div class="status-row">
+                  <span class="status" [class.err]="j.status === 'error'">{{ statusText() }}</span>
+                  @if (j.status === 'done') {
+                    <a class="text-btn" [href]="fileUrl(j.id)" download>Save again</a>
+                  }
+                </div>
               </div>
             }
           </div>
         </section>
       }
-
-      <p class="fineprint">
-        Only download content you own or have permission to use. Respect each platform's terms.
-      </p>
     </main>
 
-    <footer class="site-footer">
-      <div class="footer-grid">
-        <div class="footer-brand">
-          <div class="footer-logo">
-            <span class="logo small" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg></span>
-            <strong>AllvidLink</strong>
-          </div>
-          <p class="footer-tagline">{{ company.tagline }}</p>
-          <p class="muted-sm">Fast, free video &amp; audio conversion for the platforms you use every day.</p>
-        </div>
-
-        <nav aria-label="Supported platforms">
-          <h3>Platforms</h3>
-          <ul>
-            @for (p of platforms; track p.id) { <li>{{ p.label }}</li> }
-          </ul>
+    <footer class="footer">
+      <div class="container footer-inner">
+        <nav class="footer-links" aria-label="Legal">
+          @for (p of policies; track p.id) {
+            <button type="button" (click)="openPolicy(p.id)">{{ p.short }}</button>
+          }
+          <button type="button" (click)="cookieNotice.set(true)">Cookie settings</button>
+          @if (company.email) { <a [href]="'mailto:' + company.email">Contact</a> }
         </nav>
-
-        <nav aria-label="Legal">
-          <h3>Legal</h3>
-          <ul>
-            @for (p of policies; track p.id) {
-              <li><button type="button" class="link" (click)="openPolicy(p.id)">{{ p.title }}</button></li>
-            }
-            <li><button type="button" class="link" (click)="cookieNotice.set(true)">Cookie settings</button></li>
-          </ul>
-        </nav>
-
-        <div>
-          <h3>Company</h3>
-          <ul class="plain">
-            <li>{{ company.name }}</li>
-            <li>Reg No: {{ company.reg }}</li>
-            @if (company.address) { <li>{{ company.address }}</li> }
-            @if (company.email) { <li><a [href]="'mailto:' + company.email">{{ company.email }}</a></li> }
-          </ul>
-        </div>
-      </div>
-
-      <div class="footer-bottom">
-        <span>© {{ company.year }} {{ company.name }}. Reg No: {{ company.reg }}. All rights reserved.</span>
-        <span class="footer-tagline">{{ company.tagline }}</span>
+        <p class="copyright">
+          © {{ company.year }} {{ company.name }}. Reg No: {{ company.reg }}. All rights reserved.
+        </p>
+        <p class="tagline">{{ company.tagline }}</p>
       </div>
     </footer>
 
     @if (activePolicy(); as pol) {
-      <div class="modal-backdrop" (click)="closePolicy()">
+      <div class="backdrop" (click)="closePolicy()">
         <article class="modal" role="dialog" aria-modal="true" [attr.aria-labelledby]="'pol-' + pol.id"
                  (click)="$event.stopPropagation()">
           <header class="modal-head">
             <div>
               <h2 [id]="'pol-' + pol.id">{{ pol.title }}</h2>
-              <p class="muted-sm">Last updated: {{ pol.updated }}</p>
+              <p class="meta">Last updated {{ pol.updated }}</p>
             </div>
-            <button type="button" class="ghost close" (click)="closePolicy()" aria-label="Close">✕</button>
+            <button type="button" class="icon-btn" (click)="closePolicy()" aria-label="Close">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </button>
           </header>
           <div class="modal-body">
             @for (s of pol.sections; track s.h) {
@@ -221,12 +191,12 @@ const PLATFORM_PATTERNS: [Platform, RegExp][] = [
             }
             @if (company.email) {
               <h3>Contact</h3>
-              <p>Questions? Email <a [href]="'mailto:' + company.email">{{ company.email }}</a>.</p>
+              <p><a [href]="'mailto:' + company.email">{{ company.email }}</a></p>
             }
           </div>
-          <nav class="modal-tabs" aria-label="Other policies">
+          <nav class="modal-tabs" aria-label="Policies">
             @for (p of policies; track p.id) {
-              <button type="button" [class.on]="p.id === pol.id" (click)="openPolicy(p.id)">{{ p.title }}</button>
+              <button type="button" [class.on]="p.id === pol.id" (click)="openPolicy(p.id)">{{ p.short }}</button>
             }
           </nav>
         </article>
@@ -234,13 +204,12 @@ const PLATFORM_PATTERNS: [Platform, RegExp][] = [
     }
 
     @if (cookieNotice()) {
-      <aside class="cookie-bar" role="region" aria-label="Cookie notice">
+      <aside class="cookie" aria-label="Cookie notice">
         <p>
-          🍪 We use only essential browser storage to make AllvidLink work. There are no advertising or tracking cookies.
-          <button type="button" class="link" (click)="openPolicy('cookies')">Cookie Policy</button> ·
-          <button type="button" class="link" (click)="openPolicy('privacy')">Privacy Policy</button>
+          We use only essential storage. No tracking.
+          <button type="button" class="link" (click)="openPolicy('cookies')">Learn more</button>
         </p>
-        <button type="button" class="primary" (click)="acceptCookies()">Got it</button>
+        <button type="button" class="btn small" (click)="acceptCookies()">OK</button>
       </aside>
     }
   `,
@@ -250,12 +219,9 @@ export class App {
   private destroyRef = inject(DestroyRef);
   private poll?: Subscription;
 
-  readonly platforms = [
-    { id: 'youtube', label: 'YouTube' },
-    { id: 'facebook', label: 'Facebook' },
-    { id: 'instagram', label: 'Instagram' },
-    { id: 'tiktok', label: 'TikTok' },
-  ] as const;
+  readonly maxUrl = MAX_URL;
+  readonly company = COMPANY;
+  readonly policies = POLICIES;
 
   readonly url = signal('');
   readonly info = signal<VideoInfo | null>(null);
@@ -265,18 +231,22 @@ export class App {
   readonly quality = signal<number | null>(null);
   readonly audioFormat = signal<'mp3' | 'm4a'>('mp3');
   readonly job = signal<Job | null>(null);
+  readonly activePolicyId = signal<PolicyId | null>(null);
+  readonly activePolicy = computed(() => POLICIES.find((p) => p.id === this.activePolicyId()) ?? null);
+  readonly cookieNotice = signal(!this.readConsent());
 
   readonly detected = computed<Platform | null>(() => {
     try {
-      const host = new URL(this.url().trim()).hostname;
-      return PLATFORM_PATTERNS.find(([, re]) => re.test(host))?.[0] ?? null;
+      const u = new URL(this.url().trim());
+      if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+      return PLATFORM_PATTERNS.find(([, re]) => re.test(u.hostname))?.[0] ?? null;
     } catch {
       return null;
     }
   });
 
   readonly qualityOptions = computed(() => {
-    const common = [2160, 1440, 1080, 720, 480, 360, 240];
+    const common = [2160, 1440, 1080, 720, 480, 360];
     const hs = this.info()?.heights ?? [];
     const max = hs[0] ?? 0;
     const opts = common.filter((h) => h <= max);
@@ -295,69 +265,34 @@ export class App {
       case 'queued':
         return 'Starting…';
       case 'downloading': {
-        const parts: string[] = [];
-        if (j.kind === 'video' && j.part > 0) parts.push('Fetching audio track');
-        else parts.push('Downloading');
+        const label = j.kind === 'video' && j.part > 0 ? 'Downloading audio' : 'Downloading';
+        const parts = [label];
         if (j.progress != null) parts.push(`${j.progress.toFixed(0)}%`);
-        if (j.speed) parts.push(`${this.formatBytes(j.speed)}/s`);
-        if (j.eta != null) parts.push(`~${j.eta}s left`);
+        if (j.eta != null && j.eta > 0) parts.push(`${j.eta}s left`);
         return parts.join(' · ');
       }
       case 'processing':
-        return j.kind === 'audio' ? 'Converting to audio…' : 'Merging video & audio…';
+        return j.kind === 'audio' ? 'Converting…' : 'Finishing…';
       case 'done':
-        return `Ready · ${this.formatBytes(j.size ?? 0)}`;
+        return `Ready · ${j.filename ?? ''} · ${this.formatBytes(j.size ?? 0)}`;
       case 'error':
         return j.error ?? 'Something went wrong.';
     }
   });
 
-  readonly company = COMPANY;
-  readonly policies = POLICIES;
-  readonly activePolicyId = signal<PolicyId | null>(null);
-  readonly activePolicy = computed(() => POLICIES.find((p) => p.id === this.activePolicyId()) ?? null);
-  readonly cookieNotice = signal(!this.readConsent());
-
   constructor() {
     this.destroyRef.onDestroy(() => this.poll?.unsubscribe());
   }
 
-  openPolicy(id: PolicyId) {
-    this.activePolicyId.set(id);
-    queueMicrotask(() => document.querySelector('.modal-body')?.scrollTo(0, 0));
-  }
-
-  @HostListener('document:keydown.escape')
-  closePolicy() {
-    this.activePolicyId.set(null);
-  }
-
-  acceptCookies() {
-    try {
-      localStorage.setItem(CONSENT_KEY, new Date().toISOString());
-    } catch {
-      /* storage blocked — notice just reappears next visit */
-    }
-    this.cookieNotice.set(false);
-  }
-
-  private readConsent(): boolean {
-    try {
-      return !!localStorage.getItem(CONSENT_KEY);
-    } catch {
-      return false;
-    }
-  }
-
   async paste() {
     try {
-      const text = await navigator.clipboard.readText();
+      const text = (await navigator.clipboard.readText()).trim().slice(0, MAX_URL);
       if (text) {
-        this.url.set(text.trim());
+        this.url.set(text);
         this.fetchInfo();
       }
     } catch {
-      this.error.set('Clipboard access was blocked — paste the link manually.');
+      this.error.set('Clipboard access was blocked. Paste the link manually.');
     }
   }
 
@@ -373,7 +308,7 @@ export class App {
     const url = this.url().trim();
     if (!url) return;
     if (!this.detected()) {
-      this.error.set('Please paste a YouTube, Facebook, Instagram or TikTok link.');
+      this.error.set('Paste a valid YouTube, Facebook, Instagram or TikTok link.');
       return;
     }
     this.poll?.unsubscribe();
@@ -397,7 +332,7 @@ export class App {
 
   startDownload() {
     const v = this.info();
-    if (!v) return;
+    if (!v || this.busy()) return;
     this.error.set(null);
     const body = {
       url: v.webpage_url,
@@ -418,9 +353,9 @@ export class App {
 
   private watch(id: string) {
     this.poll?.unsubscribe();
-    this.poll = timer(0, 800)
+    this.poll = timer(0, 1000)
       .pipe(
-        switchMap(() => this.http.get<Job>(`${API}/jobs/${id}`)),
+        switchMap(() => this.http.get<Job>(`${API}/jobs/${encodeURIComponent(id)}`)),
         takeWhile((j) => j.status !== 'done' && j.status !== 'error', true),
       )
       .subscribe({
@@ -439,13 +374,41 @@ export class App {
     const a = document.createElement('a');
     a.href = this.fileUrl(id);
     a.download = '';
+    a.rel = 'noopener';
     document.body.appendChild(a);
     a.click();
     a.remove();
   }
 
   fileUrl(id: string) {
-    return `${API}/jobs/${id}/file`;
+    return `${API}/jobs/${encodeURIComponent(id)}/file`;
+  }
+
+  openPolicy(id: PolicyId) {
+    this.activePolicyId.set(id);
+    queueMicrotask(() => document.querySelector('.modal-body')?.scrollTo(0, 0));
+  }
+
+  @HostListener('document:keydown.escape')
+  closePolicy() {
+    this.activePolicyId.set(null);
+  }
+
+  acceptCookies() {
+    try {
+      localStorage.setItem(CONSENT_KEY, '1');
+    } catch {
+      /* storage blocked: the notice will show again next visit */
+    }
+    this.cookieNotice.set(false);
+  }
+
+  private readConsent(): boolean {
+    try {
+      return localStorage.getItem(CONSENT_KEY) === '1';
+    } catch {
+      return false;
+    }
   }
 
   formatDuration(s: number) {
@@ -468,9 +431,12 @@ export class App {
 
   private errMsg(e: unknown) {
     if (e instanceof HttpErrorResponse) {
-      if (e.status === 0) return 'Cannot reach the server. Is the Python backend running?';
-      return e.error?.detail ?? e.message;
+      if (e.status === 0) return 'Can\'t reach the server. Check your connection and try again.';
+      const d = e.error?.detail;
+      if (typeof d === 'string') return d;
+      if (e.status === 422) return 'Please check the link and try again.';
+      return 'Something went wrong. Please try again.';
     }
-    return String(e);
+    return 'Something went wrong. Please try again.';
   }
 }

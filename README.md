@@ -46,8 +46,26 @@ Use a **Web Service**, not a Static Site. A Static Site can't run the Python ser
 - **Manual:** choose **New → Web Service**, then:
   - Runtime: **Python 3**
   - Build command: `npm ci && npx ng build && pip install -r requirements.txt`
-  - Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+  - Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT --no-server-header`
   - Health check path: `/api/health`
+
+## Security
+
+- **Links:** only YouTube, Facebook, Instagram and TikTok links are accepted, and only the extractors for single videos run. Arbitrary websites, internal addresses, playlists and channels are rejected. Short links are followed only while they stay on those platforms over HTTPS.
+- **Limits:** each IP can make 20 info requests a minute and start 10 downloads per 10 minutes, with 1 download running at a time. The server runs at most 3 downloads at once. Files over 800 MB, videos over 2 hours and live streams are refused.
+- **Headers:** a strict Content Security Policy (no inline scripts or styles), HSTS, `X-Frame-Options: DENY`, `nosniff`, `no-referrer`, a locked-down Permissions-Policy and cross-origin isolation headers. API responses are never cached.
+- **Data:** finished files are deleted after 30 minutes, and failed ones straight away. Download IDs are random 128-bit values. The API docs pages are turned off, and error messages never show server file paths.
+
+To change a limit, set one of these environment variables (in Render: **Environment**):
+
+| Variable | Default |
+|---|---|
+| `MAX_DURATION_MINUTES` | 120 |
+| `MAX_FILESIZE_MB` | 800 |
+| `MAX_ACTIVE_JOBS` / `MAX_ACTIVE_JOBS_PER_IP` | 3 / 1 |
+| `RATE_INFO_PER_MIN` / `RATE_JOBS_PER_10MIN` | 20 / 10 |
+| `JOB_TTL_MINUTES` | 30 |
+| `ALLOWED_HOSTS` | (off) e.g. `vidlink-2.onrender.com,yourdomain.com` |
 
 ## API
 
@@ -58,7 +76,7 @@ Use a **Web Service**, not a Static Site. A Static Site can't run the Python ser
 | GET | `/api/jobs/{id}` | status, progress %, speed, ETA |
 | GET | `/api/jobs/{id}/file` | the finished file (attachment) |
 
-Finished files are stored in your system temp folder (`%TEMP%\allvidlink`). They are deleted after 1 hour.
+Finished files are stored in your system temp folder (`%TEMP%\allvidlink`). They are deleted after 30 minutes.
 
 ## Notes
 
